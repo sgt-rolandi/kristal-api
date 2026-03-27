@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 import jwt
 from passlib.context import CryptContext
 import os
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Security
 
 # =========================
 # CONFIG
@@ -16,6 +18,7 @@ ALGORITHM = "HS256"
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app = FastAPI(title="KRISTAL API")
+security = HTTPBearer()
 
 # =========================
 # DATABASE
@@ -107,10 +110,15 @@ class Atendimento(BaseModel):
 # SEGURANÇA
 # =========================
 
+def tratar_senha(senha: str):
+    return senha.encode("utf-8")[:72].decode("utf-8", "ignore")
+
 def hash_senha(senha: str):
+    senha = tratar_senha(senha)
     return pwd_context.hash(senha)
 
 def verificar_senha(senha: str, hash: str):
+    senha = tratar_senha(senha)
     return pwd_context.verify(senha, hash)
 
 def criar_token(username, role):
@@ -125,14 +133,15 @@ def verificar_token(token):
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except:
-        raise HTTPException(401, "Token inválido")
+        raise HTTPException(status_code=401, detail="Token inválido")
 
-def get_user(authorization: str = Header(None)):
-    if not authorization:
-        raise HTTPException(401, "Token ausente")
-
-    token = authorization.replace("Bearer ", "")
+def get_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+    token = credentials.credentials
     return verificar_token(token)
+
+def admin_only(user):
+    if not user or user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Acesso negado")
 
 # =========================
 # LOG
@@ -151,7 +160,7 @@ def log(usuario, acao):
     conn.close()
 
 # =========================
-# HEALTH
+# ROTAS
 # =========================
 
 @app.get("/")
@@ -165,7 +174,7 @@ def health():
 @app.post("/register")
 def register(user: Usuario):
     if user.role not in ["medico", "admin"]:
-        raise HTTPException(400, "Role inválida")
+        raise HTTPException(status_code=400, detail="Role inválida")
 
     conn = get_db()
     cur = conn.cursor()
@@ -179,7 +188,7 @@ def register(user: Usuario):
         )
         conn.commit()
     except sqlite3.IntegrityError:
-        raise HTTPException(400, "Usuário já existe")
+        raise HTTPException(status_code=400, detail="Usuário já existe")
 
     conn.close()
 
@@ -198,10 +207,10 @@ def login(user: Usuario):
     conn.close()
 
     if not db_user:
-        raise HTTPException(401, "Usuário inválido")
+        raise HTTPException(status_code=401, detail="Usuário inválido")
 
     if not verificar_senha(user.password, db_user["password"]):
-        raise HTTPException(401, "Senha inválida")
+        raise HTTPException(status_code=401, detail="Senha inválida")
 
     token = criar_token(user.username, db_user["role"])
 
@@ -220,8 +229,8 @@ def criar_paciente(p: Paciente, user=Depends(get_user)):
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO pacientes (preccp, prontuario, nome, graduacao, posto)
-        VALUES (?, ?, ?, ?, ?)
+    INSERT INTO pacientes (preccp, prontuario, nome, graduacao, posto)
+    VALUES (?, ?, ?, ?, ?)
     """, (p.preccp, p.prontuario, p.nome, p.graduacao, p.posto))
 
     conn.commit()
@@ -254,10 +263,10 @@ def atendimento(a: Atendimento, user=Depends(get_user)):
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO atendimentos (
-            paciente_id, descricao, militar_nome,
-            militar_posto, militar_graduacao, data
-        ) VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO atendimentos (
+        paciente_id, descricao, militar_nome,
+        militar_posto, militar_graduacao, data
+    ) VALUES (?, ?, ?, ?, ?, ?)
     """, (
         a.paciente_id,
         a.descricao,
@@ -273,14 +282,6 @@ def atendimento(a: Atendimento, user=Depends(get_user)):
     log(user["sub"], f"ATENDIMENTO PACIENTE {a.paciente_id}")
 
     return {"msg": "Atendimento registrado"}
-
-# =========================
-# CONTROLE DE ACESSO
-# =========================
-
-def admin_only(user):
-    if user["role"] != "admin":
-        raise HTTPException(403, "Acesso negado")
 
 # =========================
 # LOGS (ADMIN)
